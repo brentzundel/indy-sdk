@@ -107,7 +107,7 @@ pub enum ErrorCode
     // No concensus during ledger operation
     LedgerNoConsensusError = 303,
 
-    // Attempt to send unknown or incomplete transaction message
+    // Attempt to parse invalid transaction response
     LedgerInvalidTransaction = 304,
 
     // Attempt to send transaction without the necessary privileges
@@ -142,5 +142,11 @@ pub enum ErrorCode
     DidAlreadyExistsError = 600,
 
     // Unknown payment method was given
-    UnknownPaymentMethod = 700
+    PaymentUnknownMethodError = 700,
+
+    //No method were scraped from inputs/outputs or more than one were scraped
+    PaymentIncompatibleMethodsError = 701,
+
+    // Insufficient funds on inputs
+    PaymentInsufficientFundsError = 702,
 }

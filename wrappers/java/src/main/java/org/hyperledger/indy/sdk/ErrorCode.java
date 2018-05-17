@@ -165,6 +165,11 @@ public enum ErrorCode {
 	LedgerNoConsensusError(303),
 
 	/**
+	 * Attempt to parse invalid transaction response
+	 */
+	LedgerInvalidTransaction(304),
+
+	/**
 	 * Attempt to send transaction without the necessary privileges
 	 */
 	LedgerSecurityError(305),
@@ -226,7 +231,18 @@ public enum ErrorCode {
 	/**
 	 * Unknown payment method has been called
 	 */
-	UnknownPaymentMethod(700);
+	UnknownPaymentMethod(700),
+
+	/**
+	 * No method were scraped from inputs/outputs or more than one were scraped
+	 */
+	IncompatiblePaymentError(701),
+
+	/**
+	 * Insufficient funds on inputs
+	 */
+	InsufficientFundsError(702),
+	;
 
 	private int value;
 	private static Map<Integer, ErrorCode> map = new HashMap<Integer, ErrorCode>();

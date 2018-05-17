@@ -1,18 +1,18 @@
 extern crate libc;
-extern crate serde_json;
 
 use errors::indy::IndyError;
 use errors::payments::PaymentsError;
 use services::payments::{PaymentsMethodCBs, PaymentsService};
 
+use serde_json;
 use std::rc::Rc;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use services::wallet::WalletService;
-use std::collections::HashSet;
 use errors::common::CommonError;
 use std::vec::Vec;
 use std::string::String;
+use services::crypto::CryptoService;
 
 pub enum PaymentsCommand {
     RegisterMethod(
@@ -26,16 +26,17 @@ pub enum PaymentsCommand {
         Box<Fn(Result<String, IndyError>) + Send>),
     CreateAddressAck(
         i32, //handle
-        i32, //wallet_handle
+        i32, //wallet handle
         Result<String /* address */, PaymentsError>),
     ListAddresses(
-        i32, //wallet_handle
+        i32, //wallet handle
         Box<Fn(Result<String, IndyError>) + Send>),
     AddRequestFees(
+        i32, //wallet handle
+        String, //submitter did
         String, //req
         String, //inputs
         String, //outputs
-        i32, //wallet_handle
         Box<Fn(Result<(String, String), IndyError>) + Send>),
     AddRequestFeesAck(
         i32, //handle
@@ -48,8 +49,9 @@ pub enum PaymentsCommand {
         i32, //handle
         Result<String, PaymentsError>),
     BuildGetUtxoRequest(
-        String, //payment_address
         i32, //wallet_handle
+        String, //submitter did
+        String, //payment address
         Box<Fn(Result<(String, String), IndyError>) + Send>),
     BuildGetUtxoRequestAck(
         i32, //handle
@@ -62,9 +64,10 @@ pub enum PaymentsCommand {
         i32, //cmd_handle
         Result<String, PaymentsError>),
     BuildPaymentReq(
+        i32, //wallet_handle
+        String, //submitter did
         String, //inputs
         String, //outputs
-        i32, //wallet_handle
         Box<Fn(Result<(String, String), IndyError>) + Send>),
     BuildPaymentReqAck(
         i32,
@@ -77,23 +80,26 @@ pub enum PaymentsCommand {
         i32,
         Result<String, PaymentsError>),
     BuildMintReq(
-        String, //outputs
         i32, //wallet_handle
+        String, //submitter did
+        String, //outputs
         Box<Fn(Result<(String, String), IndyError>) + Send>),
     BuildMintReqAck(
         i32,
         Result<String, PaymentsError>),
     BuildSetTxnFeesReq(
+        i32, //wallet_handle
+        String, //submitter did
         String, //method
         String, //fees
-        i32, //wallet_handle
         Box<Fn(Result<String, IndyError>) + Send>),
     BuildSetTxnFeesReqAck(
         i32,
         Result<String, PaymentsError>),
     BuildGetTxnFeesReq(
-        String, //method
         i32, //wallet_handle
+        String, //submitter did
+        String, //method
         Box<Fn(Result<String, IndyError>) + Send>),
     BuildGetTxnFeesReqAck(
         i32,
@@ -110,14 +116,16 @@ pub enum PaymentsCommand {
 pub struct PaymentsCommandExecutor {
     payments_service: Rc<PaymentsService>,
     wallet_service: Rc<WalletService>,
+    crypto_service: Rc<CryptoService>,
     pending_callbacks: RefCell<HashMap<i32, Box<Fn(Result<String, IndyError>) + Send>>>,
 }
 
 impl PaymentsCommandExecutor {
-    pub fn new(payments_service: Rc<PaymentsService>, wallet_service: Rc<WalletService>) -> PaymentsCommandExecutor {
+    pub fn new(payments_service: Rc<PaymentsService>, wallet_service: Rc<WalletService>, crypto_service: Rc<CryptoService>) -> PaymentsCommandExecutor {
         PaymentsCommandExecutor {
             payments_service,
             wallet_service,
+            crypto_service,
             pending_callbacks: RefCell::new(HashMap::new()),
         }
     }
@@ -131,13 +139,13 @@ impl PaymentsCommandExecutor {
                 self.create_address(wallet_handle, &type_, &config, cb);
             }
             PaymentsCommand::CreateAddressAck(handle, wallet_handle, result) => {
-                self.create_address_ack(handle, wallet_handle,result);
+                self.create_address_ack(handle, wallet_handle, result);
             }
             PaymentsCommand::ListAddresses(wallet_handle, cb) => {
                 self.list_addresses(wallet_handle, cb);
             }
-            PaymentsCommand::AddRequestFees(req, inputs, outputs, wallet_handle, cb) => {
-                self.add_request_fees(&req, &inputs, &outputs, wallet_handle, cb);
+            PaymentsCommand::AddRequestFees(wallet_handle, submitter_did, req, inputs, outputs, cb) => {
+                self.add_request_fees(wallet_handle, &submitter_did, &req, &inputs, &outputs, cb);
             }
             PaymentsCommand::AddRequestFeesAck(cmd_handle, result) => {
                 self.add_request_fees_ack(cmd_handle, result);
@@ -148,8 +156,8 @@ impl PaymentsCommandExecutor {
             PaymentsCommand::ParseResponseWithFeesAck(cmd_handle, result) => {
                 self.parse_response_with_fees_ack(cmd_handle, result);
             }
-            PaymentsCommand::BuildGetUtxoRequest(payment_address, wallet_handle, cb) => {
-                self.build_get_utxo_request(&payment_address, wallet_handle, cb);
+            PaymentsCommand::BuildGetUtxoRequest(wallet_handle, submitter_did, payment_address, cb) => {
+                self.build_get_utxo_request(wallet_handle, &submitter_did, &payment_address, cb);
             }
             PaymentsCommand::BuildGetUtxoRequestAck(cmd_handle, result) => {
                 self.build_get_utxo_request_ack(cmd_handle, result);
@@ -160,8 +168,8 @@ impl PaymentsCommandExecutor {
             PaymentsCommand::ParseGetUtxoResponseAck(cmd_handle, result) => {
                 self.parse_get_utxo_response_ack(cmd_handle, result);
             }
-            PaymentsCommand::BuildPaymentReq(inputs, outputs, wallet_handle, cb) => {
-                self.build_payment_req(&inputs, &outputs, wallet_handle, cb);
+            PaymentsCommand::BuildPaymentReq(wallet_handle, submitter_did, inputs, outputs, cb) => {
+                self.build_payment_req(wallet_handle, &submitter_did, &inputs, &outputs, cb);
             }
             PaymentsCommand::BuildPaymentReqAck(cmd_handle, result) => {
                 self.build_payment_req_ack(cmd_handle, result);
@@ -172,20 +180,20 @@ impl PaymentsCommandExecutor {
             PaymentsCommand::ParsePaymentResponseAck(cmd_handle, result) => {
                 self.parse_payment_response_ack(cmd_handle, result);
             }
-            PaymentsCommand::BuildMintReq(outputs, wallet_handle, cb) => {
-                self.build_mint_req(&outputs, wallet_handle, cb);
+            PaymentsCommand::BuildMintReq(wallet_handle, submitter_did, outputs, cb) => {
+                self.build_mint_req(wallet_handle, &submitter_did, &outputs, cb);
             }
             PaymentsCommand::BuildMintReqAck(cmd_handle, result) => {
                 self.build_mint_req_ack(cmd_handle, result);
             }
-            PaymentsCommand::BuildSetTxnFeesReq(type_, fees, wallet_handle, cb) => {
-                self.build_set_txn_fees_req(&type_, &fees, wallet_handle, cb);
+            PaymentsCommand::BuildSetTxnFeesReq(wallet_handle, submitter_did, type_, fees, cb) => {
+                self.build_set_txn_fees_req(wallet_handle, &submitter_did, &type_, &fees, cb);
             }
             PaymentsCommand::BuildSetTxnFeesReqAck(cmd_handle, result) => {
                 self.build_set_txn_fees_req_ack(cmd_handle, result);
             }
-            PaymentsCommand::BuildGetTxnFeesReq(type_, wallet_handle, cb) => {
-                self.build_get_txn_fees_req(&type_, wallet_handle, cb);
+            PaymentsCommand::BuildGetTxnFeesReq(wallet_handle, submitter_did, type_, cb) => {
+                self.build_get_txn_fees_req(wallet_handle, &submitter_did, &type_, cb);
             }
             PaymentsCommand::BuildGetTxnFeesReqAck(cmd_handle, result) => {
                 self.build_get_txn_fees_req_ack(cmd_handle, result);
@@ -211,53 +219,78 @@ impl PaymentsCommandExecutor {
     }
 
     fn create_address(&self, wallet_handle: i32, type_: &str, config: &str, cb: Box<Fn(Result<String, IndyError>) + Send>) {
+        match self.wallet_service.check(wallet_handle) {
+            Ok(_) => (),
+            Err(err) => return cb(Err(IndyError::from(err)))
+        };
         self.process_method(cb, &|i| self.payments_service.create_address(i, wallet_handle, type_, config));
     }
 
     fn create_address_ack(&self, handle: i32, wallet_handle: i32, result: Result<String, PaymentsError>) {
         let total_result: Result<String, IndyError> = match result {
-            Ok(_) => {
-                //TODO: think about deleting payment_address on wallet save failure
-                let res = result.unwrap();
-                self.wallet_service.set(wallet_handle, &format!("pay_addr::{}", &res), "")
-                    .map_err(IndyError::from).map(|_| res)
+            Ok(res) => {
+            //TODO: think about deleting payment_address on wallet save failure
+                self.wallet_service.check(wallet_handle).and(
+                    self.wallet_service.set(wallet_handle, &format!("pay_addr::{}", &res), &res).map(|_| res)
+                ).map_err(IndyError::from)
             }
-            Err(_) => {
-                result.map_err(IndyError::from)
-            }
+            Err(err) => Err(IndyError::from(err))
         };
 
         self.common_ack(handle, total_result, "CreateAddressAck")
     }
 
     fn list_addresses(&self, wallet_handle: i32, cb: Box<Fn(Result<String, IndyError>) + Send>) {
+        match self.wallet_service.check(wallet_handle) {
+            Ok(_) => (),
+            Err(err) => return cb(Err(IndyError::from(err)))
+        };
+
         match self.wallet_service.list(wallet_handle, "pay_addr::") {
             Ok(vec) => {
-                let list_addresses = vec.iter()
-                    .map(
-                        |&(ref key, _)| {
-                            key.matches("pay_addr::(.*)").next().unwrap().to_string()
-                        })
-                    .collect::<Vec<String>>();
+                let list_addresses =
+                    vec.iter()
+                        .map(|&(_, ref value)| value.to_string())
+                        .collect::<Vec<String>>();
                 let json_string =
                     serde_json::to_string(&list_addresses)
-                        .map_err(|err| IndyError::CommonError(CommonError::InvalidStructure(err.to_string())));
+                        .map_err(|err|
+                            IndyError::CommonError(
+                                CommonError::InvalidState(format!("Cannot deserialize List of Payment Addresses: {:?}", err))));
                 cb(json_string);
             }
             Err(err) => cb(Err(IndyError::from(err)))
         }
     }
 
-    fn add_request_fees(&self, req: &str, inputs: &str, outputs: &str, wallet_handle: i32, cb: Box<Fn(Result<(String, String), IndyError>) + Send>) {
-        match PaymentsCommandExecutor::parse_method_from_inputs(inputs) {
+    fn add_request_fees(&self, wallet_handle: i32, submitter_did: &str, req: &str, inputs: &str, outputs: &str, cb: Box<Fn(Result<(String, String), IndyError>) + Send>) {
+        match self.crypto_service.validate_did(submitter_did) {
+            Err(err) => return cb(Err(IndyError::from(err))),
+            _ => ()
+        }
+        match self.wallet_service.check(wallet_handle) {
+            Ok(_) => (),
+            Err(err) => return cb(Err(IndyError::from(err)))
+        };
+
+        let method_from_inputs = self.payments_service.parse_method_from_inputs(inputs);
+
+        let method = if outputs == "[]" {
+            method_from_inputs
+        } else {
+            let method_from_outputs = self.payments_service.parse_method_from_outputs(outputs);
+            PaymentsCommandExecutor::merge_parse_result(method_from_inputs, method_from_outputs)
+        };
+
+        match method {
             Ok(type_) => {
                 let type_copy = type_.to_string();
                 self.process_method(
                     Box::new(move |result| cb(result.map(|e| (e, type_.to_string())))),
-                    &|i| self.payments_service.add_request_fees(i, &type_copy, req, inputs, outputs, wallet_handle)
+                    &|i| self.payments_service.add_request_fees(i, &type_copy, wallet_handle, submitter_did, req, inputs, outputs)
                 );
             }
-            Err(error) => cb(Err(error)),
+            Err(error) => cb(Err(IndyError::from(error))),
         };
     }
 
@@ -273,13 +306,28 @@ impl PaymentsCommandExecutor {
         self.common_ack_payments(cmd_handle, result, "ParseResponseWithFeesFeesAck")
     }
 
-    fn build_get_utxo_request(&self, payment_address: &str, wallet_handle: i32, cb: Box<Fn(Result<(String,String), IndyError>) + Send>) {
-        let method = payment_address.matches("[^:]+:([^:]+):.*").next().unwrap().to_string();
+    fn build_get_utxo_request(&self, wallet_handle: i32, submitter_did: &str, payment_address: &str, cb: Box<Fn(Result<(String, String), IndyError>) + Send>) {
+        match self.crypto_service.validate_did(submitter_did) {
+            Err(err) => return cb(Err(IndyError::from(err))),
+            _ => ()
+        }
+        match self.wallet_service.check(wallet_handle) {
+            Ok(_) => (),
+            Err(err) => return cb(Err(IndyError::from(err)))
+        };
+
+        let method = match self.payments_service.parse_method_from_payment_address(payment_address) {
+            Ok(method) => method,
+            Err(err) => {
+                cb(Err(IndyError::from(err)));
+                return;
+            }
+        };
         let method_copy = method.to_string();
 
         self.process_method(
             Box::new(move |get_utxo_txn_json| cb(get_utxo_txn_json.map(|s| (s, method.to_string())))),
-            & |i| self.payments_service.build_get_utxo_request(i, &method_copy, payment_address, wallet_handle)
+                    &|i| self.payments_service.build_get_utxo_request(i, &method_copy, wallet_handle, &submitter_did, payment_address)
         );
     }
 
@@ -295,16 +343,30 @@ impl PaymentsCommandExecutor {
         self.common_ack_payments(cmd_handle, result, "ParseGetUtxoResponseAck")
     }
 
-    fn build_payment_req(&self, inputs: &str, outputs: &str, wallet_handle:i32, cb: Box<Fn(Result<(String, String), IndyError>) + Send>) {
-        match PaymentsCommandExecutor::parse_method_from_inputs(inputs) {
+    fn build_payment_req(&self, wallet_handle: i32, submitter_did: &str, inputs: &str, outputs: &str, cb: Box<Fn(Result<(String, String), IndyError>) + Send>) {
+        match self.crypto_service.validate_did(submitter_did) {
+            Err(err) => return cb(Err(IndyError::from(err))),
+            _ => ()
+        }
+
+        match self.wallet_service.check(wallet_handle) {
+            Ok(_) => (),
+            Err(err) => return cb(Err(IndyError::from(err)))
+        };
+
+        let method_from_inputs = self.payments_service.parse_method_from_inputs(inputs);
+        let method_from_outputs = self.payments_service.parse_method_from_outputs(outputs);
+        let method = PaymentsCommandExecutor::merge_parse_result(method_from_inputs, method_from_outputs);
+
+        match method {
             Ok(type_) => {
                 let type_copy = type_.to_string();
                 self.process_method(
                     Box::new(move |result| cb(result.map(|s| (s, type_.to_string())))),
-                    &|i| self.payments_service.build_payment_req(i, &type_copy, inputs, outputs, wallet_handle)
+                    &|i| self.payments_service.build_payment_req(i, &type_copy, wallet_handle, submitter_did, inputs, outputs)
                 );
             }
-            Err(error) => cb(Err(error))
+            Err(error) => cb(Err(IndyError::from(error)))
         }
     }
 
@@ -320,16 +382,27 @@ impl PaymentsCommandExecutor {
         self.common_ack_payments(cmd_handle, result, "ParsePaymentResponseAck")
     }
 
-    fn build_mint_req(&self, outputs: &str, wallet_handle: i32, cb: Box<Fn(Result<(String, String), IndyError>) + Send>) {
-        match PaymentsCommandExecutor::parse_method_from_outputs(outputs) {
+    fn build_mint_req(&self, wallet_handle: i32, submitter_did: &str, outputs: &str, cb: Box<Fn(Result<(String, String), IndyError>) + Send>) {
+        match self.crypto_service.validate_did(submitter_did) {
+            Err(err) => return cb(Err(IndyError::from(err))),
+            _ => ()
+        }
+
+        match self.wallet_service.check(wallet_handle) {
+            //TODO: move to helper
+            Ok(_) => (),
+            Err(err) => return cb(Err(IndyError::from(err)))
+        };
+
+        match self.payments_service.parse_method_from_outputs(outputs) {
             Ok(type_) => {
                 let type_copy = type_.to_string();
                 self.process_method(
                     Box::new(move |result| cb(result.map(|s| (s, type_.to_string())))),
-                    &|i| self.payments_service.build_mint_req(i, &type_copy, outputs, wallet_handle)
+                    &|i| self.payments_service.build_mint_req(i, &type_copy, wallet_handle, submitter_did, outputs)
                 );
             }
-            Err(error) => cb(Err(error))
+            Err(error) => cb(Err(IndyError::from(error)))
         }
     }
 
@@ -337,16 +410,37 @@ impl PaymentsCommandExecutor {
         self.common_ack_payments(cmd_handle, result, "BuildMintReqAck");
     }
 
-    fn build_set_txn_fees_req(&self, type_: &str, fees: &str, wallet_handle:i32, cb: Box<Fn(Result<String, IndyError>) + Send>) {
-        self.process_method(cb, &|i| self.payments_service.build_set_txn_fees_req(i, type_, fees, wallet_handle))
+    fn build_set_txn_fees_req(&self, wallet_handle: i32, submitter_did: &str, type_: &str, fees: &str, cb: Box<Fn(Result<String, IndyError>) + Send>) {
+        match self.crypto_service.validate_did(submitter_did) {
+            Err(err) => return cb(Err(IndyError::from(err))),
+            _ => ()
+        }
+        match self.wallet_service.check(wallet_handle) {
+            Ok(_) => (),
+            Err(err) => return cb(Err(IndyError::from(err)))
+        };
+
+        match serde_json::from_str::<HashMap<String, i64>>(fees) {
+            Ok(_) => self.process_method(cb, &|i| self.payments_service.build_set_txn_fees_req(i, type_, wallet_handle, submitter_did, fees)),
+            Err(err) => cb(Err(IndyError::CommonError(CommonError::InvalidStructure(format!("Cannot deserialize Fees: {:?}", err)))))
+        }
     }
 
     fn build_set_txn_fees_req_ack(&self, cmd_handle: i32, result: Result<String, PaymentsError>) {
         self.common_ack_payments(cmd_handle, result, "BuildSetTxnFeesReq");
     }
 
-    fn build_get_txn_fees_req(&self, type_: &str, wallet_handle:i32, cb: Box<Fn(Result<String, IndyError>) + Send>) {
-        self.process_method(cb, &|i| self.payments_service.build_get_txn_fees_req(i, type_, wallet_handle))
+    fn build_get_txn_fees_req(&self, wallet_handle: i32, submitter_did: &str, type_: &str, cb: Box<Fn(Result<String, IndyError>) + Send>) {
+        match self.crypto_service.validate_did(submitter_did) {
+            Err(err) => return cb(Err(IndyError::from(err))),
+            _ => ()
+        }
+        match self.wallet_service.check(wallet_handle) {
+            Ok(_) => (),
+            Err(err) => return cb(Err(IndyError::from(err)))
+        };
+
+        self.process_method(cb, &|i| self.payments_service.build_get_txn_fees_req(i, type_, wallet_handle, submitter_did))
     }
 
     fn build_get_txn_fees_req_ack(&self, cmd_handle: i32, result: Result<String, PaymentsError>) {
@@ -386,52 +480,11 @@ impl PaymentsCommandExecutor {
         }
     }
 
-    fn parse_method_from_inputs(inputs: &str) -> Result<String, IndyError> {
-        PaymentsCommandExecutor::parse_method(
-            inputs,
-            Box::new(
-                move |json|
-                    json.as_str().map(|s| s.to_string())))
-    }
-
-    fn parse_method_from_outputs(inputs: &str) -> Result<String, IndyError> {
-        PaymentsCommandExecutor::parse_method(
-            inputs,
-            Box::new(
-                move |json|
-                    match json.as_object()
-                        .map(|obj|
-                            obj.get("paymentAddress")
-                                .map(|val|
-                                    val.as_str()
-                                        .map(|s| s.to_string()))) {
-                        Some(Some(e)) => e,
-                        _ => None
-                    }
-            ))
-    }
-
-    fn parse_method(raw: &str, unwrapper: Box<Fn(serde_json::Value) -> Option<String> + Send>) -> Result<String, IndyError> {
-        let inputs_json : Vec<serde_json::Value> = serde_json::from_str(raw).unwrap();
-
-        let result_set : HashSet<String> =
-            inputs_json.into_iter()
-                .filter_map(|v| unwrapper(v))
-                .filter_map(|input_str| input_str.matches("[^:]+:([^:]+):.*").next().map(|s| s.to_string()))
-                .collect();
-
-        match result_set.len() {
-            0 => {
-                error!("No payment methods found in inputs!");
-                Err(IndyError::from(CommonError::InvalidStructure("No payment methods found in inputs".to_string())))
-            }
-            1 => {
-                Ok(result_set.into_iter().next().unwrap().to_string())
-            }
-            _ => {
-                error!("More than one payment method found in inputs!");
-                Err(IndyError::from(CommonError::InvalidStructure("More than one payment method found in inputs!".to_string())))
-            }
+    fn merge_parse_result(method_from_inputs: Result<String, PaymentsError>, method_from_outputs: Result<String, PaymentsError>) -> Result<String, PaymentsError> {
+        match (method_from_inputs, method_from_outputs) {
+            (Err(err), _) | (_, Err(err)) => Err(err),
+            (Ok(ref mth1), Ok(ref mth2)) if mth1 != mth2 => Err(PaymentsError::IncompatiblePaymentError("Different payment method in inputs and outputs".to_string())),
+            (Ok(mth1), Ok(_)) => Ok(mth1)
         }
     }
 }
